@@ -90,7 +90,8 @@ public:
     
     // Remove voxels in a radius around a local point
     // Returns true if anything changed
-    bool destroy_at(const LPoint3& localPos, float radius);
+    // If outVoxels is provided, appends destroyed voxel positions (local space) and colors
+    bool destroy_at(const LPoint3& localPos, float radius, std::vector<std::pair<LPoint3, unsigned char>>* outVoxels = nullptr);
     
     // Initialize grid from data
     void init_grid();

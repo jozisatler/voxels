@@ -28,6 +28,8 @@
 #include "cullFaceAttrib.h"
 #include "depthWriteAttrib.h"
 #include "shader.h"
+#include "geomPoints.h"
+#include "geomTriangles.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -58,7 +60,140 @@ struct GameState {
     // HUD
     PT(TextNode) hudText;
     NodePath hudNode;
+    
+    NodePath particlesRoot;
+    NodePath debrisTemplate;
+    
+    struct DebrisInstance {
+        NodePath node;
+        LVector3 velocity;
+        float lifetime; // Track how long particle has existed
+    };
+    std::vector<DebrisInstance> activeDebris;
 };
+
+// Debris Manager Task (Replaces individual tasks)
+AsyncTask::DoneStatus debrisManagerTask(GenericAsyncTask* task, void* data) {
+    GameState* state = static_cast<GameState*>(data);
+    double dt = ClockObject::get_global_clock()->get_dt();
+    
+    // Update all particles
+    for (size_t i = 0; i < state->activeDebris.size(); ) {
+        GameState::DebrisInstance& debris = state->activeDebris[i];
+        
+        // Update velocity (Gravity)
+        debris.lifetime += dt;
+        
+        // Brief stationary period before falling (0.1 seconds)
+        if (debris.lifetime > 0.1f) {
+            debris.velocity.set_z(debris.velocity.get_z() - 9.8f * dt); // Realistic gravity (9.8 m/s²)
+        }
+        
+        // Update position
+        if (!debris.node.is_empty()) {
+             LPoint3 pos = debris.node.get_pos();
+             pos += debris.velocity * dt;
+             debris.node.set_pos(pos);
+             
+             // Kill check
+             if (pos.get_z() < -10) { // Increased threshold so particles live longer
+                 debris.node.remove_node();
+                 // Swap with last and pop
+                 state->activeDebris[i] = state->activeDebris.back();
+                 state->activeDebris.pop_back();
+                 continue; 
+             }
+        } else {
+             // Invalid node, remove
+             state->activeDebris[i] = state->activeDebris.back();
+             state->activeDebris.pop_back();
+             continue;
+        }
+        
+        ++i;
+    }
+    return AsyncTask::DS_cont;
+}
+
+// Simple debris system
+void spawnDebris(GameState* state, const LPoint3& pos, const LColor& color) {
+     if (state->particlesRoot.is_empty()) {
+         state->particlesRoot = state->window->get_render().attach_new_node("particles");
+     }
+     
+     // Initialize template if needed
+     if (state->debrisTemplate.is_empty()) {
+         // Create a simple cube geometry
+         PT(GeomVertexData) vdata = new GeomVertexData("debris", GeomVertexFormat::get_v3(), Geom::UH_static);
+         GeomVertexWriter vertex(vdata, "vertex");
+         
+         // Cube vertices
+         float s = 0.1f; // Half-size (2.0 unit cube - very visible for testing)
+         // Front
+         vertex.add_data3f(-s, -s, s); vertex.add_data3f(s, -s, s); vertex.add_data3f(s, -s, -s); vertex.add_data3f(-s, -s, -s);
+         // Back
+         vertex.add_data3f(-s, s, s); vertex.add_data3f(s, s, s); vertex.add_data3f(s, s, -s); vertex.add_data3f(-s, s, -s);
+         
+         // Helper for quad (using raw pointer)
+         auto add_quad = [](GeomTriangles* prim, int v0, int v1, int v2, int v3) {
+             prim->add_vertices(v0, v1, v2);
+             prim->add_vertices(v0, v2, v3);
+         };
+         
+         PT(GeomTriangles) prim = new GeomTriangles(Geom::UH_static);
+         // Front
+         add_quad(prim, 0, 1, 2, 3);
+         // Back
+         add_quad(prim, 5, 4, 7, 6);
+         // Top
+         add_quad(prim, 4, 5, 1, 0);
+         // Bottom
+         add_quad(prim, 3, 2, 6, 7);
+         // Left
+         add_quad(prim, 4, 0, 3, 7);
+         // Right
+         add_quad(prim, 1, 5, 6, 2);
+         prim->close_primitive();
+         
+         PT(Geom) geom = new Geom(vdata);
+         geom->add_primitive(prim);
+         
+         PT(GeomNode) gnode = new GeomNode("debris_template_node");
+         gnode->add_geom(geom);
+         
+         state->debrisTemplate = NodePath(gnode);
+         state->debrisTemplate.set_light_off();
+         state->debrisTemplate.set_two_sided(true); // Ensure visibility from all angles
+     }
+     
+     // Instance the template by copying it
+     NodePath debris = state->debrisTemplate.copy_to(state->particlesRoot);
+     debris.set_name("debris");
+     debris.set_pos(pos);
+     debris.set_color(color);
+     debris.show(); // Ensure it's visible
+     
+     // Debug: print first particle position
+     static bool first = true;
+     if (first) {
+         first = false;
+         std::cout << "First debris at: " << pos << " color: " << color << std::endl;
+         std::cout << "Debris node path: " << debris << std::endl;
+         std::cout << "Parent: " << state->particlesRoot << std::endl;
+     }
+     
+     // Add to manager
+     GameState::DebrisInstance inst;
+     inst.node = debris;
+     // Very small initial velocity - mostly stationary
+     float vx = ((rand() % 100) / 100.0f - 0.5f) * 0.5f;  // Minimal horizontal
+     float vy = ((rand() % 100) / 100.0f - 0.5f) * 0.5f;  // Minimal horizontal
+     float vz = 0.0f; // Start stationary, gravity will pull it down
+     inst.velocity.set(vx, vy, vz);
+     inst.lifetime = 0.0f; // Initialize lifetime
+     
+     state->activeDebris.push_back(inst);
+}
 
 // Task for HUD Update
 AsyncTask::DoneStatus updateHudTask(GenericAsyncTask* task, void* data) {
@@ -240,7 +375,38 @@ AsyncTask::DoneStatus interactionTask(GenericAsyncTask* task, void* data) {
                      LPoint3 localPoint = volume->nodePath.get_relative_point(window->get_render(), explosionCenter);
                      
                      // Apply destruction (transforms are handled by get_relative_point, including scale)
-                     volume->destroy_at(localPoint, state->destructionRadius);
+                     std::vector<std::pair<LPoint3, unsigned char>> destroyedVoxels;
+                     if (volume->destroy_at(localPoint, state->destructionRadius, &destroyedVoxels)) {
+                         // Spawn particles at actual destroyed voxel positions
+                         int MAX_SPAWN = 100;
+                         int spawned = 0;
+                         int skip = 0;
+                         
+                         for (const auto& voxel : destroyedVoxels) {
+                             if (spawned >= MAX_SPAWN) break;
+                             if (skip++ % 3 != 0) continue; // Spawn 1 in 3 voxels
+                             
+                             // voxel.first is in local space (centered coordinates)
+                             // Transform to world space using the volume's transform
+                             LMatrix4 transform = volume->nodePath.get_mat(window->get_render());
+                             LPoint3 voxelWorldPos = transform.xform_point(voxel.first);
+                             
+                             // Add small random offset so particles don't all overlap
+                             float rx = ((rand() % 100) / 100.0f - 0.5f) * 0.05f;
+                             float ry = ((rand() % 100) / 100.0f - 0.5f) * 0.05f;
+                             float rz = ((rand() % 100) / 100.0f - 0.5f) * 0.05f;
+                             voxelWorldPos += LVector3(rx, ry, rz);
+                             
+                             LColor c = volume->palette[voxel.second];
+                             
+                             spawnDebris(state, voxelWorldPos, c);
+                             spawned++;
+                         }
+                         
+                         if (spawned > 0) {
+                             std::cout << "Spawned " << spawned << " debris particles from " << destroyedVoxels.size() << " destroyed voxels" << std::endl;
+                         }
+                     }
                 }
             }
         }
@@ -449,6 +615,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Adding HUD task..." << std::endl;
     GenericAsyncTask* hudTask = new GenericAsyncTask("hudTask", &updateHudTask, &state);
     AsyncTaskManager::get_global_ptr()->add(hudTask);
+    
+    // Debris Manager
+    GenericAsyncTask* debrisTask = new GenericAsyncTask("debrisMgr", &debrisManagerTask, &state);
+    AsyncTaskManager::get_global_ptr()->add(debrisTask);
     
     std::cout << "Defining keys..." << std::endl;
     // Add Events for Scroll

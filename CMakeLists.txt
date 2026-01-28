@@ -75,6 +75,9 @@ add_custom_command(TARGET SpinningCube POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_SOURCE_DIR}/castle.vox"
     "$<TARGET_FILE_DIR:SpinningCube>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_SOURCE_DIR}/skybox.sha"
+    "$<TARGET_FILE_DIR:SpinningCube>"
 )
 
 # Try to copy the necessary DLLs to the build directory (Optional convenience)

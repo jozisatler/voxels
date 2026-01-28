@@ -290,7 +290,7 @@ void VoxelVolume::update_region(int minX, int minY, int minZ, int maxX, int maxY
     }
 }
 
-bool VoxelVolume::destroy_at(const LPoint3& localPos, float radius) {
+bool VoxelVolume::destroy_at(const LPoint3& localPos, float radius, std::vector<std::pair<LPoint3, unsigned char>>* outVoxels) {
     if (grid.empty()) return false;
 
     // Use grid logic
@@ -330,6 +330,11 @@ bool VoxelVolume::destroy_at(const LPoint3& localPos, float radius) {
                 if (dx*dx + dy*dy + dz*dz <= r2) {
                     int idx = x + y * sizeX + z * sizeX * sizeY;
                     if (grid[idx] != 0) {
+                        if (outVoxels) {
+                            // Convert grid position back to local space (centered)
+                            LPoint3 voxelLocalPos(x - cx, y - cy, z - cz);
+                            outVoxels->push_back(std::make_pair(voxelLocalPos, grid[idx]));
+                        }
                         grid[idx] = 0;
                         changed = true;
                     }
