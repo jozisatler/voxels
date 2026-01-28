@@ -14,6 +14,28 @@
 #include "windowProperties.h"
 #include "directionalLight.h"
 #include "ambientLight.h"
+#include "textNode.h"
+#include "graphicsPipe.h"
+#include "graphicsStateGuardian.h"
+#include <sstream>
+#include <iomanip>
+#include <string>
+#include "load_prc_file.h"
+#include "camera.h"
+#include "perspectiveLens.h"
+#include "compassEffect.h"
+#include "texturePool.h"
+#include "cullFaceAttrib.h"
+#include "depthWriteAttrib.h"
+#include "shader.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+extern "C" {
+    __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 // Global state for interaction
 struct GameState {
@@ -32,7 +54,54 @@ struct GameState {
     CollisionTraverser* traverser = nullptr;
     PT(CollisionHandlerQueue) queue;
     PT(CollisionRay) pickerRay;
+
+    // HUD
+    PT(TextNode) hudText;
+    NodePath hudNode;
 };
+
+// Task for HUD Update
+AsyncTask::DoneStatus updateHudTask(GenericAsyncTask* task, void* data) {
+    GameState* state = static_cast<GameState*>(data);
+    
+    ClockObject* clock = ClockObject::get_global_clock();
+    double fps = clock->get_average_frame_rate();
+    
+    std::string gpuName = "Unknown GPU";
+    std::string gpuType = "Unknown Type";
+    
+    if (state->window) {
+        GraphicsWindow* gw = state->window->get_graphics_window();
+        if (gw) {
+            GraphicsStateGuardian* gsg = gw->get_gsg();
+            if (gsg) {
+                gpuName = gsg->get_driver_renderer();
+            }
+        }
+    }
+    
+    // Simple heuristic for type
+    // Convert to lowercase for easier check if needed, but standard strings are usually Case Sensitive.
+    // We will just check common substrings.
+    if (gpuName.find("Intel") != std::string::npos || gpuName.find("UHD") != std::string::npos || gpuName.find("Iris") != std::string::npos) {
+        gpuType = "Integrated";
+    } else if (gpuName.find("NVIDIA") != std::string::npos || gpuName.find("AMD") != std::string::npos || gpuName.find("Radeon") != std::string::npos || gpuName.find("GeForce") != std::string::npos) {
+        gpuType = "Dedicated";
+    } else if (gpuName.find("Microsoft Basic Render") != std::string::npos) {
+        gpuType = "Software (Performance Issues Expected)";
+    }
+
+    std::ostringstream ss;
+    ss << "FPS: " << std::fixed << std::setprecision(1) << fps << "\n";
+    ss << "GPU: " << gpuName << "\n";
+    ss << "Type: " << gpuType;
+    
+    if (state->hudText) {
+        state->hudText->set_text(ss.str());
+    }
+    
+    return AsyncTask::DS_cont;
+}
 
 // Task for Free Look Camera (WASD + Mouse)
 // Task for Free Look Camera (WASD + Mouse)
@@ -155,23 +224,23 @@ AsyncTask::DoneStatus interactionTask(GenericAsyncTask* task, void* data) {
             }
             
             if (hitEntry) {
-                NodePath hitNode = hitEntry->get_into_node_path();
-                LPoint3 hitPoint = hitEntry->get_surface_point(hitNode);
-                LVector3 hitNormal = hitEntry->get_surface_normal(hitNode);
-                
-                // Nudge point slightly inside the voxel to ensure we hit the right one
-                // Since normal points OUT, we subtract a bit of the normal
-                LPoint3 targetPoint = hitPoint - (hitNormal * 0.5f);
-                
-                NodePath parent = hitNode.get_parent();
-
+                // Get world point of impact for consistent multi-volume destruction
+                LPoint3 worldPoint = hitEntry->get_surface_point(window->get_render());
+                LVector3 worldNormal = hitEntry->get_surface_normal(window->get_render());
+                 
+                // Nudge slightly IN to the surface (opposite to normal)
+                LPoint3 explosionCenter = worldPoint - (worldNormal * 0.2f);
+                 
+                // Iterate ALL volumes to ensure border explosions affect neighbors
                 for (auto* volume : state->volumes) {
-                     if (volume->nodePath == parent || volume->nodePath == hitNode) {
-                          if (volume->destroy_at(targetPoint, state->destructionRadius)) {
-                               // std::cout << "Destroyed block at " << targetPoint << " radius " << state->destructionRadius << std::endl;
-                          }
-                          break;
-                     }
+                     // Check if volume is valid and in scene
+                     if (volume->nodePath.is_empty()) continue;
+                     
+                     // Convert world explosion center to volume local space
+                     LPoint3 localPoint = volume->nodePath.get_relative_point(window->get_render(), explosionCenter);
+                     
+                     // Apply destruction (transforms are handled by get_relative_point, including scale)
+                     volume->destroy_at(localPoint, state->destructionRadius);
                 }
             }
         }
@@ -203,12 +272,39 @@ void scroll_down(const Event* event, void* data) {
 
 
 int main(int argc, char* argv[]) {
+    // Configure window settings via PRC (preferred for Panda3D startup)
+    
+    // Get Screen Resolution to avoid black bars / low res
+    int width = 800;
+    int height = 600;
+#if defined(_WIN32)
+    width = GetSystemMetrics(SM_CXSCREEN);
+    height = GetSystemMetrics(SM_CYSCREEN);
+#endif
+
+    std::string winSizeCmd = "win-size " + std::to_string(width) + " " + std::to_string(height);
+    
+    // "fullscreen #t" typically uses the desktop resolution (borderless-like if configured right, or exclusive)
+    load_prc_file_data("", winSizeCmd);
+    load_prc_file_data("", "fullscreen #t");
+    
     PandaFramework framework;
     framework.open_framework(argc, argv);
     framework.set_window_title("Destructible Castle Demo");
-    
+
     WindowFramework* window = framework.open_window();
     if (window == nullptr) return 1;
+
+    // Adjust FOV
+    NodePath camGroup = window->get_camera_group();
+    NodePath camNP = camGroup.find("**/+Camera");
+    if (!camNP.is_empty()) {
+        Camera* cam = DCAST(Camera, camNP.node());
+        Lens* lens = cam->get_lens();
+        if (lens) {
+            lens->set_fov(90.0f);
+        }
+    }
     
     // Setup state
     GameState state;
@@ -236,14 +332,70 @@ int main(int argc, char* argv[]) {
     // props.set_mouse_mode(WindowProperties::M_relative); // Let's keep absolute + manual re-center for now
     window->get_graphics_window()->request_properties(props);
 
-    // Load Model
-    NodePath root = VoxLoader::load_vox("castle.vox", window, state.volumes);
+    // HUD Setup (Done before loading so we can use it for progress)
+    state.hudText = new TextNode("hud");
+    state.hudText->set_text("Initializing...");
+    state.hudText->set_shadow(0.05, 0.05);
+    state.hudText->set_shadow_color(0, 0, 0, 1);
+    
+    state.hudNode = window->get_aspect_2d().attach_new_node(state.hudText);
+    state.hudNode.set_scale(0.05);
+    state.hudNode.set_pos(-1.6, 0, 0.95); // Top left corner
+
+    // Loading Screen Text
+    PT(TextNode) loadingText = new TextNode("loading");
+    loadingText->set_text("Loading Castle...");
+    loadingText->set_align(TextNode::A_center);
+    NodePath loadingNode = window->get_aspect_2d().attach_new_node(loadingText);
+    loadingNode.set_scale(0.07);
+    loadingNode.set_pos(0, 0, 0);
+
+    // Initial Render to show "Loading..."
+    framework.get_graphics_engine()->render_frame();
+
+    // Load Model with Progress Callback
+    auto progressCallback = [&](float progress, std::string msg) {
+         // Update loading text
+         std::ostringstream ss;
+         ss << "Loading: " << (int)(progress * 100) << "%\n" << msg;
+         loadingText->set_text(ss.str());
+         
+         // Force render
+         framework.get_graphics_engine()->render_frame();
+    };
+
+    NodePath root = VoxLoader::load_vox("castle.vox", window, state.volumes, progressCallback);
+
+    // Remove loading text
+    loadingNode.remove_node();
     
     if (!root.is_empty()) {
         root.reparent_to(window->get_render());
         root.set_scale(0.1);
         root.set_pos(0, 0, 0);
         
+        // Create Skybox
+        NodePath skybox = window->load_model(framework.get_models(), "models/misc/sphere");
+        if (!skybox.is_empty()) {
+            skybox.set_scale(500);
+            skybox.set_bin("background", 0);
+            skybox.set_depth_write(false);
+            skybox.set_light_off();
+            skybox.set_two_sided(true); 
+            
+            // Procedural Skybox Shader
+            CPT(Shader) shader = Shader::load("skybox.sha");
+            if (shader) {
+                skybox.set_shader(shader);
+            } else {
+                skybox.set_color(0.5, 0.7, 1.0, 1); // Fallback
+            }
+            
+            // Parent to camera group but use CompassEffect to ignore position relative to render
+            skybox.reparent_to(window->get_render());
+            skybox.set_effect(CompassEffect::make(window->get_camera_group(), CompassEffect::P_pos));
+        }
+
         // Lighting Setup
         // Ambient Light
         PT(AmbientLight) alight = new AmbientLight("alight");
@@ -293,6 +445,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Adding interaction task..." << std::endl;
     GenericAsyncTask* intTask = new GenericAsyncTask("interactionTask", &interactionTask, &state);
     AsyncTaskManager::get_global_ptr()->add(intTask);
+
+    std::cout << "Adding HUD task..." << std::endl;
+    GenericAsyncTask* hudTask = new GenericAsyncTask("hudTask", &updateHudTask, &state);
+    AsyncTaskManager::get_global_ptr()->add(hudTask);
     
     std::cout << "Defining keys..." << std::endl;
     // Add Events for Scroll

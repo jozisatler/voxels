@@ -1,0 +1,37 @@
+//Cg
+//Cg profile arbvp1 arbfp1
+
+void vshader(float4 vtx_position : POSITION,
+             float4 vtx_color : COLOR,
+             uniform float4x4 mat_modelproj,
+             out float4 l_position : POSITION,
+             out float4 l_color : COLOR,
+             out float3 l_texcoord : TEXCOORD0)
+{
+  l_position = mul(mat_modelproj, vtx_position);
+  l_color = vtx_color;
+  l_texcoord = normalize(vtx_position.xyz);
+}
+
+void fshader(float3 l_texcoord : TEXCOORD0,
+             out float4 o_color : COLOR)
+{
+  float3 dir = normalize(l_texcoord);
+  // Map z from -1..1 to 0..1
+  float t = 0.5 * (dir.z + 1.0);
+  // Enhance the gradient
+  t = smoothstep(0.3, 0.8, t);
+  
+  float3 top = float3(0.1, 0.4, 0.8); // Deep Blue
+  float3 mid = float3(0.4, 0.7, 0.9); // Light Blue
+  float3 bot = float3(0.9, 0.95, 1.0); // White Haze
+  
+  float3 color;
+  if (t < 0.5) {
+      color = lerp(bot, mid, t * 2.0);
+  } else {
+      color = lerp(mid, top, (t - 0.5) * 2.0);
+  }
+  
+  o_color = float4(color, 1.0);
+}

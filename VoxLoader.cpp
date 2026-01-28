@@ -351,7 +351,8 @@ void VoxLoader::load_default_palette(LColor* palette) {
     }
 }
 
-NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* window, std::vector<VoxelVolume*>& outVolumes) {
+NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* window, std::vector<VoxelVolume*>& outVolumes, std::function<void(float, std::string)> progressCallback) {
+    if (progressCallback) progressCallback(0.0f, "Opening file...");
     std::cout << "Loading VOX file: " << filename << std::endl;
     auto start_total = std::chrono::high_resolution_clock::now();
 
@@ -370,6 +371,8 @@ NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* windo
          return NodePath("loader_error");
     }
     file.close();
+
+    if (progressCallback) progressCallback(0.1f, "Parsing VOX structure...");
 
     MemoryReader reader(buffer);
 
@@ -480,7 +483,10 @@ NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* windo
     
     auto end_parse = std::chrono::high_resolution_clock::now();
     std::cout << "Parsing file took: " << std::chrono::duration_cast<std::chrono::milliseconds>(end_parse - start_total).count() << "ms" << std::endl;
+    std::cout << "Parsing file took: " << std::chrono::duration_cast<std::chrono::milliseconds>(end_parse - start_total).count() << "ms" << std::endl;
     std::cout << "Parsing done. Models: " << models.size() << " Nodes: " << sceneNodes.size() << std::endl;
+
+    if (progressCallback) progressCallback(0.2f, "Building Scene Graph...");
 
     NodePath root("VoxScene");
     
@@ -515,11 +521,21 @@ NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* windo
     
     // Use futures to run compute_mesh in parallel
     std::vector<std::future<void>> jobs;
+    int total_vols = outVolumes.size();
+    std::atomic<int> completed_vols(0);
+    
     for (size_t i = 0; i < outVolumes.size(); ++i) {
         VoxelVolume* vol = outVolumes[i];
-        jobs.push_back(std::async(std::launch::async, [vol, i](){
+        jobs.push_back(std::async(std::launch::async, [vol, i, total_vols, &completed_vols, progressCallback](){
             try {
                 vol->compute_mesh();
+                int c = ++completed_vols;
+                if (progressCallback && (c % 5 == 0 || c == total_vols)) {
+                     // Note: Calling callback from thread might be unsafe if it touches GPU/Panda global state without locks.
+                     // But we will handle thread safety in main.cpp or just update atomic/mutex there.
+                     // For simplicity, we assume the callback handles synchronization or just prints.
+                     // IMPORTANT: TextNode update is not thread safe.
+                }
             } catch (const std::exception& e) {
                 std::cerr << "Exception in vol " << i << ": " << e.what() << std::endl;
             } catch (...) {
@@ -528,14 +544,18 @@ NodePath VoxLoader::load_vox(const std::string& filename, WindowFramework* windo
         }));
     }
     
-    // Wait for all
-    try {
-        for (auto& job : jobs) job.get();
-    } catch (const std::exception& e) {
-        std::cerr << "Main thread caught exception: " << e.what() << std::endl;
+    // Wait and update progress in main thread
+    for (int i=0; i<jobs.size(); ++i) {
+        if (progressCallback) {
+             float p = 0.3f + 0.6f * ((float)i / jobs.size());
+             progressCallback(p, "Generating Meshes " + std::to_string(i) + "/" + std::to_string(jobs.size()));
+        }
+        jobs[i].get(); 
     }
     
     auto t_mesh_comp_end = std::chrono::high_resolution_clock::now();
+    
+    if (progressCallback) progressCallback(0.9f, "Uploading Meshes to GPU...");
     
     // Apply (sequential on main thread)
     std::cout << "Mesh comp done. Applying..." << std::endl;

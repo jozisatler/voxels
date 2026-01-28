@@ -3,6 +3,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <functional> // Added for callback
 #include "pandaFramework.h"
 #include "pandaSystem.h"
 
@@ -98,7 +99,7 @@ public:
 class VoxLoader {
 public:
     // Loads the file and populates the volumes list with all the interactive models found
-    static NodePath load_vox(const std::string& filename, WindowFramework* window, std::vector<VoxelVolume*>& outVolumes);
+    static NodePath load_vox(const std::string& filename, WindowFramework* window, std::vector<VoxelVolume*>& outVolumes, std::function<void(float, std::string)> progressCallback = nullptr);
     
     // Helper to regenerate mesh (exposed for VoxelVolume)
     static void generate_mesh(const VoxData& data, const LColor* palette, NodePath& parent);
